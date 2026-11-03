@@ -989,6 +989,14 @@ class NightRecorder(
 	fun hasInterruptedNight(): Boolean = prefs.getString(KEY_NIGHT_ID, null) != null
 
 	companion object {
+		/** A night without patch data for this long raises the full-screen "Patch disconnected" alert. */
+		const val PATCH_ALERT_AFTER_MS = 60_000L
+
+		/** True while a recording night has had no patch data for [PATCH_ALERT_AFTER_MS]. */
+		fun patchAlert(s: State, nowEpochMs: Long): Boolean =
+			s.recording && s.outageActive && s.outageSinceEpochMs > 0L &&
+				nowEpochMs - s.outageSinceEpochMs >= PATCH_ALERT_AFTER_MS
+
 		private const val TAG = "NightRecorder"
 		private const val PREFS = "lucidsleep_night"
 		private const val KEY_NIGHT_ID = "night_local_session_id"

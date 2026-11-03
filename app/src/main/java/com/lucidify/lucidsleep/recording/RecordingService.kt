@@ -21,8 +21,11 @@ import com.lucidify.lucidsleep.R
 import com.lucidify.lucidsleep.ui.MainActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /**
@@ -33,11 +36,13 @@ import kotlinx.coroutines.launch
 class RecordingService : Service() {
 	private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 	private var wakeLock: PowerManager.WakeLock? = null
+	private var alertWatch: Job? = null
 
 	override fun onBind(intent: Intent?): IBinder? = null
 
 	override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
 		if (intent?.action == ACTION_STOP) {
+			cancelPatchAlert()
 			releaseWakeLock()
 			ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
 			stopSelf()
@@ -51,6 +56,7 @@ class RecordingService : Service() {
 		acquireWakeLock()
 		val recorder = (application as LucidSleepApp).graph.recorder
 		recorder.start()
+		if (alertWatch == null) alertWatch = scope.launch { watchPatch() }
 		// A null intent means Android restarted the service after the process died.
 		if (intent == null || intent.action == ACTION_RESUME) {
 			scope.launch {
@@ -63,6 +69,7 @@ class RecordingService : Service() {
 	}
 
 	override fun onDestroy() {
+		cancelPatchAlert()
 		releaseWakeLock()
 		scope.cancel()
 		super.onDestroy()
@@ -96,6 +103,65 @@ class RecordingService : Service() {
 		ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, type)
 	}
 
+	/**
+	 * Raises the "Patch disconnected" alert once per outage when a night has had no patch data
+	 * for a minute (the app reconnects on its own before then), and clears it when data is back.
+	 * The alert opens the app over the lock screen, where the recording screen flashes red.
+	 */
+	private suspend fun watchPatch() {
+		val graph = (application as LucidSleepApp).graph
+		var alertedFor = 0L
+		while (scope.isActive) {
+			val s = graph.recorder.state.value
+			val now = System.currentTimeMillis()
+			if (NightRecorder.patchAlert(s, now)) {
+				if (alertedFor != s.outageSinceEpochMs) {
+					alertedFor = s.outageSinceEpochMs
+					postPatchAlert()
+					graph.log.event("PATCH_ALERT", "silentSec" to (now - s.outageSinceEpochMs) / 1000L,
+						"battery" to s.batteryPercent?.toInt())
+				}
+			} else if (alertedFor != 0L) {
+				alertedFor = 0L
+				cancelPatchAlert()
+			}
+			delay(5_000)
+		}
+	}
+
+	private fun postPatchAlert() {
+		val nm = getSystemService(NotificationManager::class.java)
+		if (nm.getNotificationChannel(ALERT_CHANNEL_ID) == null) {
+			nm.createNotificationChannel(
+				NotificationChannel(ALERT_CHANNEL_ID, "Patch disconnected", NotificationManager.IMPORTANCE_HIGH).apply {
+					description = "Alerts you when the patch stops recording during the night"
+					enableVibration(true)
+				}
+			)
+		}
+		val open = PendingIntent.getActivity(
+			this, 1, Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+			PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+		)
+		val notification = NotificationCompat.Builder(this, ALERT_CHANNEL_ID)
+			.setSmallIcon(R.drawable.ic_stat_moon)
+			.setColor(0xFFE53935.toInt())
+			.setContentTitle("Patch disconnected")
+			.setContentText("Your night isn't being recorded. Turn the patch off and on again.")
+			.setPriority(NotificationCompat.PRIORITY_MAX)
+			.setCategory(NotificationCompat.CATEGORY_ALARM)
+			.setFullScreenIntent(open, true)
+			.setContentIntent(open)
+			.setAutoCancel(true)
+			.build()
+		runCatching { nm.notify(ALERT_NOTIFICATION_ID, notification) }
+			.onFailure { Log.w(TAG, "Patch alert refused", it) }
+	}
+
+	private fun cancelPatchAlert() {
+		runCatching { getSystemService(NotificationManager::class.java).cancel(ALERT_NOTIFICATION_ID) }
+	}
+
 	private fun acquireWakeLock() {
 		if (wakeLock?.isHeld == true) return
 		val pm = getSystemService(PowerManager::class.java)
@@ -114,6 +180,8 @@ class RecordingService : Service() {
 		private const val TAG = "RecordingService"
 		private const val CHANNEL_ID = "sleep_recording"
 		private const val NOTIFICATION_ID = 41
+		private const val ALERT_CHANNEL_ID = "patch_alert"
+		private const val ALERT_NOTIFICATION_ID = 42
 		const val ACTION_RESUME = "com.lucidify.lucidsleep.RESUME"
 		const val ACTION_STOP = "com.lucidify.lucidsleep.STOP"
 

@@ -22,7 +22,11 @@ import com.lucidify.lucidsleep.LucidSleepApp
 import com.lucidify.lucidsleep.core.cloudrecording.CloudSyncScheduler
 import com.lucidify.lucidsleep.enroll.EnrollmentCodec
 import com.lucidify.lucidsleep.enroll.KitLookup
+import com.lucidify.lucidsleep.recording.NightRecorder
 import com.lucidify.lucidsleep.recording.RecordingService
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 	override fun onCreate(savedInstanceState: Bundle?) {
@@ -32,6 +36,20 @@ class MainActivity : ComponentActivity() {
 		handleEnrollLink(intent)
 		setContent {
 			LucidSleepTheme { LucidSleepRoot(graph) }
+		}
+		// While the patch is lost during a night, the app may show over the lock screen and
+		// turn the screen on, so the "Patch disconnected" alert is seen. Otherwise it may not.
+		lifecycleScope.launch {
+			var shown: Boolean? = null
+			while (true) {
+				val alert = NightRecorder.patchAlert(graph.recorder.state.value, System.currentTimeMillis())
+				if (alert != shown) {
+					shown = alert
+					setShowWhenLocked(alert)
+					setTurnScreenOn(alert)
+				}
+				delay(2_000)
+			}
 		}
 	}
 

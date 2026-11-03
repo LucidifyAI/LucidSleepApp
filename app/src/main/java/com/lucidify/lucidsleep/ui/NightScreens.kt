@@ -1,6 +1,11 @@
 package com.lucidify.lucidsleep.ui
 
 import android.app.Activity
+import androidx.compose.animation.animateColor
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -429,8 +434,16 @@ fun RecordingScreen(graph: AppGraph) {
 	// A tap brightens the screen for 20 seconds so the time and Stop are easy to read.
 	var awakeTap by remember { mutableIntStateOf(0) }
 	var awake by remember { mutableStateOf(false) }
-	val bright = awake || confirmStop
-	LaunchedEffect(Unit) { while (true) { delay(10_000); now = System.currentTimeMillis() } }
+	// The patch has been silent for a minute: a full-screen red alert until it's back (or hidden).
+	var alertHiddenUntil by remember { mutableLongStateOf(0L) }
+	val alert = NightRecorder.patchAlert(rec, now) && now >= alertHiddenUntil
+	val bright = awake || confirmStop || alert
+	LaunchedEffect(Unit) { while (true) { delay(5_000); now = System.currentTimeMillis() } }
+	DisposableEffect(alert) {
+		val window = (context as? Activity)?.window
+		if (alert) window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+		onDispose { if (alert) window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
+	}
 	LaunchedEffect(awakeTap) {
 		if (awakeTap > 0) {
 			awake = true
@@ -509,6 +522,15 @@ fun RecordingScreen(graph: AppGraph) {
 		}
 	}
 
+	if (alert) {
+		PatchLostAlert(
+			silentMinutes = ((now - rec.outageSinceEpochMs) / 60_000L).coerceAtLeast(1L),
+			batteryPercent = rec.batteryPercent,
+			onHide = { alertHiddenUntil = System.currentTimeMillis() + ALERT_HIDE_MS },
+			onStop = { confirmStop = true }
+		)
+	}
+
 	if (confirmStop) {
 		AlertDialog(
 			onDismissRequest = { confirmStop = false },
@@ -525,6 +547,61 @@ fun RecordingScreen(graph: AppGraph) {
 		)
 	}
 }
+
+private const val ALERT_HIDE_MS = 15 * 60_000L
+
+/** Full screen, flashing red: the patch stopped sending during the night and needs a hand. */
+@Composable
+private fun PatchLostAlert(silentMinutes: Long, batteryPercent: Float?, onHide: () -> Unit, onStop: () -> Unit) {
+	val flash by rememberInfiniteTransition(label = "patchAlert").animateColor(
+		initialValue = Color(0xFF6E0F12),
+		targetValue = Color(0xFFD32F2F),
+		animationSpec = infiniteRepeatable(tween(700), RepeatMode.Reverse),
+		label = "patchAlertColor"
+	)
+	val white = Color.White
+	Column(
+		Modifier
+			.fillMaxSize()
+			.background(flash)
+			// Swallow taps so nothing behind the alert is pressed by accident.
+			.pointerInput(Unit) { detectTapGestures { } }
+			.statusBarsPadding()
+			.navigationBarsPadding()
+			.padding(28.dp),
+		verticalArrangement = Arrangement.spacedBy(16.dp)
+	) {
+		Spacer(Modifier.weight(1f))
+		Text("Patch disconnected", color = white, fontSize = 40.sp, lineHeight = 46.sp, fontWeight = FontWeight.Bold)
+		Text(
+			"Your night isn't being recorded. No signal for $silentMinutes min.",
+			color = white, fontSize = 21.sp, lineHeight = 29.sp
+		)
+		if ((batteryPercent ?: 100f) <= LOW_PATCH_BATTERY_PERCENT) {
+			Text("The patch battery was low. It may have run out.", color = white, fontSize = 21.sp, lineHeight = 29.sp, fontWeight = FontWeight.SemiBold)
+		}
+		Text(
+			"Look at the patch's white light.\n" +
+				"• Light off: press the round button to turn the patch on. If it won't turn on, charge it, then turn it on.\n" +
+				"• Light on: hold the button to turn the patch off, wait a few seconds, then turn it on again.",
+			color = white, fontSize = 19.sp, lineHeight = 28.sp
+		)
+		Text("Recording picks up again by itself when the patch reconnects.", color = white.copy(alpha = 0.9f), fontSize = 17.sp, lineHeight = 24.sp)
+		Spacer(Modifier.weight(1f))
+		OutlinedButton(
+			onClick = onHide,
+			modifier = Modifier.fillMaxWidth().height(56.dp),
+			border = BorderStroke(2.dp, white)
+		) { Text("Hide for 15 minutes", color = white, fontSize = 19.sp, fontWeight = FontWeight.SemiBold) }
+		OutlinedButton(
+			onClick = onStop,
+			modifier = Modifier.fillMaxWidth().height(56.dp),
+			border = BorderStroke(2.dp, white.copy(alpha = 0.7f))
+		) { Text("I'm up — stop recording", color = white, fontSize = 19.sp) }
+	}
+}
+
+private const val LOW_PATCH_BATTERY_PERCENT = 15f
 
 // ---------------------------------------------------------------------------------------
 // 11. Good morning
