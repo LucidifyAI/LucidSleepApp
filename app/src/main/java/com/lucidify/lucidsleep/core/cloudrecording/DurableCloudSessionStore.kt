@@ -355,6 +355,11 @@ class DurableCloudSessionStore(context: Context) {
 				skippedNotReady++
 				continue
 			}
+			// LucidSleep keeps a finished night until its morning diary is answered or skipped.
+			if (cleanupHeld(snapshot.localSessionId, nowEpochMs)) {
+				skippedNotReady++
+				continue
+			}
 
 			var session = snapshot
 			if (session.eligibleForCleanupAtEpochMs == null) {
@@ -884,6 +889,26 @@ class DurableCloudSessionStore(context: Context) {
 		}
 	}
 
+	/**
+	 * Keeps a finished session's folder (and so its markers file) on the phone until
+	 * [untilEpochMs], even once it is finalized, so markers can still be added to it.
+	 */
+	fun holdCleanup(localSessionId: String, untilEpochMs: Long) {
+		requireSession(localSessionId)
+		val file = File(sessionDirectory(localSessionId), CLEANUP_HOLD_FILENAME)
+		withFileLock(file) { file.writeText(untilEpochMs.toString()) }
+	}
+
+	fun releaseCleanupHold(localSessionId: String) {
+		val file = File(sessionDirectory(localSessionId), CLEANUP_HOLD_FILENAME)
+		if (file.isFile) withFileLock(file) { file.delete() }
+	}
+
+	private fun cleanupHeld(localSessionId: String, nowEpochMs: Long): Boolean = runCatching {
+		val file = File(sessionDirectory(localSessionId), CLEANUP_HOLD_FILENAME)
+		file.isFile && (file.readText().trim().toLongOrNull() ?: 0L) > nowEpochMs
+	}.getOrDefault(false)
+
 	fun listMarkers(localSessionId: String): List<DurableSessionMarker> =
 		readMarkers(markersFile(localSessionId))
 			.sortedWith(compareBy<DurableSessionMarker>({ it.sampleIndex }, { it.createdAtEpochMs }))
@@ -1344,6 +1369,7 @@ class DurableCloudSessionStore(context: Context) {
 		private const val MARKERS_FILENAME = "markers.json"
 		private const val MARKER_SCHEMA_VERSION = 1
 		private const val MAX_MARKERS_PER_SESSION = 5_000
+		private const val CLEANUP_HOLD_FILENAME = "cleanup_hold.txt"
 		private const val SCHEMA_VERSION = 4
 		private const val MAX_ERROR_LENGTH = 2_000
 		const val DEFAULT_FINALIZED_RETENTION_MS = 0L

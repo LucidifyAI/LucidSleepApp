@@ -25,8 +25,17 @@ class SeriesStore(context: Context) {
 		val recordedMs: Long,
 		val status: Status,
 		/** True once the sleeper has seen the Good morning summary for this night. */
-		val reviewed: Boolean
-	)
+		val reviewed: Boolean,
+		/** Time the patch was disconnected during the night (gaps of a couple of minutes or more). */
+		val gapMs: Long = 0L,
+		/** When the first such gap began. */
+		val firstGapAtEpochMs: Long? = null
+	) {
+		/** Ran 4 hours or more but didn't count: the patch was disconnected for too long. */
+		val partial: Boolean
+			get() = status == Status.SHORT && gapMs > 0L && endedAtEpochMs != null &&
+				endedAtEpochMs - startedAtEpochMs >= SeriesStore.MIN_VALID_NIGHT_MS
+	}
 
 	data class Progress(
 		val required: Int,
@@ -69,6 +78,15 @@ class SeriesStore(context: Context) {
 		save(list.filterNot { it.localSessionId == localSessionId } + ended)
 	}
 
+	/** Notes a time the patch was disconnected during a night, for My nights and Good morning. */
+	@Synchronized
+	fun noteGap(localSessionId: String, atEpochMs: Long, gapMs: Long) {
+		save(_nights.value.map {
+			if (it.localSessionId != localSessionId) it
+			else it.copy(gapMs = it.gapMs + gapMs, firstGapAtEpochMs = it.firstGapAtEpochMs ?: atEpochMs)
+		})
+	}
+
 	/** The most recent finished night the sleeper has not reviewed yet, if any. */
 	fun unreviewedNight(): Night? =
 		_nights.value.filter { it.status != Status.RECORDING && !it.reviewed }.maxByOrNull { it.startedAtEpochMs }
@@ -94,6 +112,8 @@ class SeriesStore(context: Context) {
 					.put("recordedMs", n.recordedMs)
 					.put("status", n.status.name)
 					.put("reviewed", n.reviewed)
+					.put("gapMs", n.gapMs)
+					.put("firstGapAt", n.firstGapAtEpochMs ?: -1L)
 			)
 		}
 		prefs.edit().putString(KEY_NIGHTS, arr.toString()).apply()
@@ -110,7 +130,9 @@ class SeriesStore(context: Context) {
 				endedAtEpochMs = o.optLong("endedAt", -1L).takeIf { it > 0L },
 				recordedMs = o.optLong("recordedMs", 0L),
 				status = runCatching { Status.valueOf(o.getString("status")) }.getOrDefault(Status.SHORT),
-				reviewed = o.optBoolean("reviewed", true)
+				reviewed = o.optBoolean("reviewed", true),
+				gapMs = o.optLong("gapMs", 0L),
+				firstGapAtEpochMs = o.optLong("firstGapAt", -1L).takeIf { it > 0L }
 			)
 		}
 	}.getOrDefault(emptyList())
@@ -120,5 +142,7 @@ class SeriesStore(context: Context) {
 		private const val KEY_NIGHTS = "nights"
 		/** Provisional: 4 hours of recorded EEG makes a night count. */
 		const val MIN_VALID_NIGHT_MS = 4L * 60L * 60L * 1000L
+		/** Shorter dropouts aren't worth telling the sleeper about. */
+		const val NOTABLE_GAP_MS = 2L * 60L * 1000L
 	}
 }

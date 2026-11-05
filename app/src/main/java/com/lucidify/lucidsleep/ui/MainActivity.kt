@@ -16,6 +16,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.ui.Modifier
 import com.google.firebase.auth.FirebaseAuth
 import com.lucidify.lucidsleep.AppGraph
 import com.lucidify.lucidsleep.LucidSleepApp
@@ -102,7 +109,7 @@ class MainActivity : ComponentActivity() {
 	}
 }
 
-private enum class HomeStep { HOME, GUIDE, READY, CONTACT, NIGHTS, HELP }
+private enum class HomeStep { HOME, GUIDE, CHECKIN, READY, CONTACT, NIGHTS, HELP }
 
 /**
  * Picks the screen from where the sleeper is: one-time setup first, then the nightly loop.
@@ -132,7 +139,8 @@ fun LucidSleepRoot(graph: AppGraph) {
 
 	// Keep the Patch connected only on the screens that need it (or while recording), and
 	// let it go when this screen goes away.
-	val holdLink = rec.recording || step == HomeStep.READY || step == HomeStep.CONTACT ||
+	// The bedtime questions too, so the patch is usually connected by the time the checks show.
+	val holdLink = rec.recording || step == HomeStep.CHECKIN || step == HomeStep.READY || step == HomeStep.CONTACT ||
 		(step == HomeStep.GUIDE && guideNext == HomeStep.CONTACT)
 	DisposableEffect(holdLink) {
 		graph.recorder.holdLink(holdLink)
@@ -157,19 +165,48 @@ fun LucidSleepRoot(graph: AppGraph) {
 		unreviewed != null -> GoodMorningScreen(graph, unreviewed)
 		else -> {
 			BackHandler(enabled = step != HomeStep.HOME) {
-				step = if (step == HomeStep.GUIDE && guideNext != HomeStep.READY) guideNext else HomeStep.HOME
+				step = if (step == HomeStep.GUIDE && guideNext != HomeStep.CHECKIN) guideNext else HomeStep.HOME
 			}
 			when (step) {
-				HomeStep.HOME -> HomeScreen(
-					graph,
-					// The how-to plays before the checks until it has been watched to the end once.
-					onReady = { if (SetupGuide.watched(context)) step = HomeStep.READY else openGuide(HomeStep.READY) },
-					onNights = { step = HomeStep.NIGHTS },
-					onHelp = { step = HomeStep.HELP }
-				)
+				HomeStep.HOME, HomeStep.NIGHTS, HomeStep.HELP -> Column(Modifier.fillMaxSize()) {
+					// Home, My nights and Help share a tab bar; it takes the bottom system inset.
+					Box(Modifier.weight(1f).consumeWindowInsets(WindowInsets.navigationBars)) {
+						when (step) {
+							HomeStep.NIGHTS -> MyNightsScreen(graph, onBack = { step = HomeStep.HOME })
+							HomeStep.HELP -> HelpScreen(graph, onBack = { step = HomeStep.HOME }, onGuide = { openGuide(HomeStep.HELP) })
+							else -> HomeScreen(
+								graph,
+								// The how-to plays before the checks until it has been watched to the end once.
+								// Then the bedtime questions, then the checks.
+								onReady = { if (SetupGuide.watched(context)) step = HomeStep.CHECKIN else openGuide(HomeStep.CHECKIN) },
+								onNights = { step = HomeStep.NIGHTS },
+								onHelp = { step = HomeStep.HELP }
+							)
+						}
+					}
+					HomeTabBar(
+						selected = when (step) {
+							HomeStep.NIGHTS -> HomeTab.NIGHTS
+							HomeStep.HELP -> HomeTab.HELP
+							else -> HomeTab.HOME
+						},
+						onSelect = { tab ->
+							step = when (tab) {
+								HomeTab.HOME -> HomeStep.HOME
+								HomeTab.NIGHTS -> HomeStep.NIGHTS
+								HomeTab.HELP -> HomeStep.HELP
+							}
+						}
+					)
+				}
 				HomeStep.GUIDE -> SetupGuideScreen(
-					doneLabel = if (guideNext == HomeStep.READY) "Next: check everything" else "Done",
+					doneLabel = if (guideNext == HomeStep.CHECKIN) "Continue" else "Done",
 					onDone = { step = guideNext }
+				)
+				HomeStep.CHECKIN -> BedtimeCheckInScreen(
+					graph,
+					onNext = { step = HomeStep.READY },
+					onBack = { step = HomeStep.HOME }
 				)
 				HomeStep.READY -> ReadyCheckScreen(
 					graph,
@@ -184,8 +221,6 @@ fun LucidSleepRoot(graph: AppGraph) {
 					onHelp = { step = HomeStep.HELP },
 					onGuide = { openGuide(HomeStep.CONTACT) }
 				)
-				HomeStep.NIGHTS -> MyNightsScreen(graph, onBack = { step = HomeStep.HOME })
-				HomeStep.HELP -> HelpScreen(graph, onBack = { step = HomeStep.HOME }, onGuide = { openGuide(HomeStep.HELP) })
 			}
 		}
 	}

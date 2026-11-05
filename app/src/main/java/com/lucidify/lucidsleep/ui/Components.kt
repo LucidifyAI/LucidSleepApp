@@ -20,7 +20,16 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.material3.Button
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.PathParser
+import androidx.compose.ui.semantics.Role
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
@@ -86,6 +95,8 @@ fun LucidSleepTheme(content: @Composable () -> Unit) {
 fun ScreenFrame(
 	title: String,
 	subtitle: String? = null,
+	/** A small label above the title, such as "Step 2 of 5". */
+	step: String? = null,
 	onHelp: (() -> Unit)? = null,
 	background: Color = Palette.Navy,
 	bottom: @Composable ColumnScope.() -> Unit = {},
@@ -100,6 +111,10 @@ fun ScreenFrame(
 			.imePadding()
 			.padding(horizontal = 24.dp, vertical = 16.dp)
 	) {
+		if (step != null) {
+			Text(step.uppercase(), color = Palette.Amber, fontSize = 15.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp)
+			Spacer(Modifier.height(4.dp))
+		}
 		Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
 			Text(title, style = MaterialTheme.typography.headlineMedium, modifier = Modifier.weight(1f))
 			if (onHelp != null) {
@@ -118,6 +133,62 @@ fun ScreenFrame(
 		)
 		Spacer(Modifier.height(12.dp))
 		Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp), content = bottom)
+	}
+}
+
+enum class HomeTab(val label: String) { HOME("Home"), NIGHTS("Nights"), HELP("Help") }
+
+/** The tab bar under Home, My nights and Help. */
+@Composable
+fun HomeTabBar(selected: HomeTab, onSelect: (HomeTab) -> Unit) {
+	Column(Modifier.fillMaxWidth().background(Palette.NavyRaised).navigationBarsPadding()) {
+		HorizontalDivider(color = Palette.NavyLine)
+		Row(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+			HomeTab.entries.forEach { tab ->
+				val on = tab == selected
+				val color = if (on) Palette.Amber else Palette.InkMuted
+				Column(
+					Modifier
+						.weight(1f)
+						.heightIn(min = 56.dp)
+						.selectable(selected = on, role = Role.Tab) { onSelect(tab) }
+						.padding(vertical = 4.dp),
+					horizontalAlignment = Alignment.CenterHorizontally,
+					verticalArrangement = Arrangement.spacedBy(2.dp, Alignment.CenterVertically)
+				) {
+					Icon(TabIcons.of(tab), contentDescription = null, tint = color, modifier = Modifier.size(26.dp))
+					Text(tab.label, color = color, fontSize = 14.sp, fontWeight = if (on) FontWeight.Bold else FontWeight.Normal)
+				}
+			}
+		}
+	}
+}
+
+/** Line icons for the tab bar, drawn from path data (no icon library needed). */
+private object TabIcons {
+	private fun icon(name: String, vararg paths: String): ImageVector =
+		ImageVector.Builder(name, 24.dp, 24.dp, 24f, 24f).apply {
+			paths.forEach {
+				addPath(
+					PathParser().parsePathString(it).toNodes(),
+					stroke = SolidColor(Color.Black),
+					strokeLineWidth = 2f,
+					strokeLineCap = StrokeCap.Round,
+					strokeLineJoin = StrokeJoin.Round
+				)
+			}
+		}.build()
+
+	private val home by lazy { icon("home", "M3 11L12 4L21 11", "M5 10V20H19V10") }
+	private val moon by lazy { icon("nights", "M20 14.5A8 8 0 1 1 9.5 4A6.5 6.5 0 0 0 20 14.5Z") }
+	private val help by lazy {
+		icon("help", "M12 2A10 10 0 1 0 12 22A10 10 0 1 0 12 2Z", "M9.1 9A3 3 0 0 1 14.9 10C14.9 12 11.9 13 11.9 13", "M12 17H12.01")
+	}
+
+	fun of(tab: HomeTab): ImageVector = when (tab) {
+		HomeTab.HOME -> home
+		HomeTab.NIGHTS -> moon
+		HomeTab.HELP -> help
 	}
 }
 

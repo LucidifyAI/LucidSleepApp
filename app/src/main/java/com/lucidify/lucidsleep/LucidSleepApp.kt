@@ -10,6 +10,7 @@ import com.lucidify.lucidsleep.core.cloudrecording.CloudSyncScheduler
 import com.lucidify.lucidsleep.core.cloudrecording.DurableCloudSessionStore
 import com.lucidify.lucidsleep.core.cloudrecording.DurableCloudSyncEngine
 import com.lucidify.lucidsleep.enroll.EnrollmentStore
+import com.lucidify.lucidsleep.recording.NightAnswers
 import com.lucidify.lucidsleep.recording.NightLog
 import com.lucidify.lucidsleep.recording.NightRecorder
 import com.lucidify.lucidsleep.series.SeriesStore
@@ -61,7 +62,8 @@ class AppGraph(context: Context) {
 		engine = DurableCloudSyncEngine(store, orgApi, httpClient),
 		setupStore = setup,
 		series = series,
-		log = log
+		log = log,
+		answers = NightAnswers(appContext, store, log)
 	)
 
 	companion object {

@@ -70,7 +70,9 @@ class NightRecorder(
 	private val engine: DurableCloudSyncEngine,
 	private val setupStore: EnrollmentStore,
 	private val series: SeriesStore,
-	private val log: NightLog
+	private val log: NightLog,
+	/** The sleeper's bedtime answers, "I'm awake" taps and morning diary. */
+	val answers: NightAnswers
 ) {
 	enum class Link { OFF, SEARCHING, CONNECTING, CONNECTED, STREAMING }
 
@@ -559,6 +561,8 @@ class NightRecorder(
 			if (frame > recTotalFrames) {
 				closeChunk()
 				log.event("RESUME_GAP", "insertedSamples" to (frame - recTotalFrames))
+				val gapMs = (frame - recTotalFrames) * 1000L / SAMPLE_RATE_HZ
+				if (gapMs >= SeriesStore.NOTABLE_GAP_MS) recLocalId?.let { series.noteGap(it, arrivalWallMs - gapMs, gapMs) }
 				recTotalFrames = frame
 				markHighWater()
 			}
@@ -578,6 +582,9 @@ class NightRecorder(
 			outageStartedElapsed.compareAndSet(outageStart, 0L)
 			_state.update { it.copy(outageActive = false, outageSinceEpochMs = 0L) }
 			log.event("OUTAGE_END", "gapMs" to gapMs, "insertedSamples" to missing)
+			if (gapMs >= SeriesStore.NOTABLE_GAP_MS) {
+				recLocalId?.let { series.noteGap(it, System.currentTimeMillis() - gapMs, gapMs) }
+			}
 		}
 		recLastPacketArrivalMs = arrivalElapsedMs
 
@@ -761,6 +768,7 @@ class NightRecorder(
 			.apply()
 		series.nightStarted(id, now)
 		log.beginNight(id)
+		answers.attachBedtime(id, now)
 		log.event("NIGHT_START", "localSessionId" to id, "patch" to address, "phone" to "${Build.MANUFACTURER} ${Build.MODEL}",
 			"android" to Build.VERSION.SDK_INT)
 		withContext(packetThread) {
@@ -787,6 +795,25 @@ class NightRecorder(
 		recActive = true
 	}
 
+	/** "I'm awake" during a night: a marker at this moment. Returns its id, for [addAwakeReason]. */
+	suspend fun markAwake(): String? = withContext(Dispatchers.IO) {
+		val s = _state.value
+		val id = s.localSessionId
+		if (!s.recording || id == null) return@withContext null
+		val now = System.currentTimeMillis()
+		answers.awake(id, s.samplesRecorded, now - s.nightStartedAtEpochMs, now).also { uploadWake.trySend(Unit) }
+	}
+
+	/** What woke the sleeper, added at the moment it's chosen. */
+	suspend fun addAwakeReason(awakeEventId: String, reason: String) = withContext(Dispatchers.IO) {
+		val s = _state.value
+		val id = s.localSessionId
+		if (!s.recording || id == null) return@withContext
+		val now = System.currentTimeMillis()
+		answers.awakeReason(id, awakeEventId, reason, s.samplesRecorded, now - s.nightStartedAtEpochMs, now)
+		uploadWake.trySend(Unit)
+	}
+
 	/** Ends the night, hands it to the upload path for finalizing and returns its summary. */
 	suspend fun stopNight(): NightSummary? = withContext(Dispatchers.IO + NonCancellable) { lifecycle.withLock {
 		if (!_state.value.recording) return@withContext null
@@ -802,6 +829,8 @@ class NightRecorder(
 		val endedAt = System.currentTimeMillis()
 		val recordedMs = samples * 1000L / SAMPLE_RATE_HZ
 		if (drained) {
+			// Before it can finish uploading: keep the night on the phone for its morning diary.
+			answers.holdForDiary(id)
 			runCatching {
 				store.markSessionStopping(localSessionId = id, finalSeqExclusive = finalSeq, endedAtEpochMs = endedAt)
 				CloudSyncScheduler.enqueueFinalization(context, id)

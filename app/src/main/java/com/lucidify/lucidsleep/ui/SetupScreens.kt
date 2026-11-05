@@ -69,6 +69,7 @@ fun SignInScreen(graph: AppGraph) {
 
 	ScreenFrame(
 		title = "Welcome to LucidSleep™",
+		step = "Step 1 of 5",
 		subtitle = "Let's set up your kit. This takes about 10 minutes.",
 		bottom = {
 			BigButton(if (busy && !showEmail) "Signing in…" else "Sign in with Google", enabled = !busy) {
@@ -226,6 +227,7 @@ fun FindKitScreen(graph: AppGraph) {
 		}
 		else -> ScreenFrame(
 			title = "Scan your kit card",
+			step = "Step 2 of 5",
 			subtitle = email?.let { "Signed in as $it" },
 			bottom = {
 				BigButton(if (busy) "Checking the code…" else "Scan the kit card", enabled = !busy) {
@@ -272,6 +274,7 @@ fun ConsentScreen(graph: AppGraph) {
 	var research by remember { mutableStateOf(false) }
 	ScreenFrame(
 		title = "Before we start",
+		step = "Step 3 of 5",
 		bottom = {
 			BigButton("I understand and agree") {
 				graph.setup.saveConsent(shareWithDoctor = share, researchOptIn = research)
@@ -345,6 +348,7 @@ fun PhoneCheckScreen(graph: AppGraph) {
 
 	ScreenFrame(
 		title = "Phone check",
+		step = "Step 4 of 5",
 		subtitle = "Your phone needs a few settings so it can record all night without you.",
 		bottom = {
 			BigButton("Continue", enabled = ready) {
@@ -397,6 +401,7 @@ fun PairScreen(graph: AppGraph) {
 
 	ScreenFrame(
 		title = "Find your patch",
+		step = "Step 5 of 5",
 		subtitle = "Press the round button with the Lucidify logo to turn on your patch, and keep it near your phone.",
 		bottom = {
 			BigButton(if (busy) "Looking for your patch…" else "Find my patch", enabled = !busy) {

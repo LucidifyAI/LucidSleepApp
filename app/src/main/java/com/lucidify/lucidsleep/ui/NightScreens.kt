@@ -8,6 +8,10 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
+import androidx.compose.foundation.clickable
+import java.text.SimpleDateFormat
+import java.util.Locale
 import android.content.IntentFilter
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
@@ -70,8 +74,13 @@ import com.lucidify.lucidsleep.AppGraph
 import com.lucidify.lucidsleep.core.patch.PatchContactMonitor
 import com.lucidify.lucidsleep.recording.NightRecorder
 import com.lucidify.lucidsleep.series.SeriesStore
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.runtime.saveable.rememberSaveable
 import java.io.File
 import java.text.DateFormat
 import java.util.Date
@@ -87,17 +96,20 @@ fun HomeScreen(graph: AppGraph, onReady: () -> Unit, onNights: () -> Unit, onHel
 	val required = setup.enrollment?.nightsRequired ?: 5
 	val progress = remember(nights, required) { graph.series.progress(required) }
 	val label = setup.enrollment?.label
+	val rec by graph.recorder.state.collectAsState()
+	val lastNight = nights.lastOrNull { it.status != SeriesStore.Status.RECORDING }
 
+	// Nights and Help are in the tab bar under this screen.
 	ScreenFrame(
 		title = if (progress.complete) "All nights done" else "Night ${progress.nextNightNumber} of ${progress.required}",
 		subtitle = label,
-		onHelp = onHelp,
 		bottom = {
 			if (!progress.complete) BigButton("Get ready for tonight", onClick = onReady)
-			QuietButton("My nights", onClick = onNights)
 		}
 	) {
 		SeriesBar(progress)
+		Note("${progress.counted} of ${progress.required} nights counted")
+		lastNight?.let { LastNightCard(it, rec, onNights) }
 		if (progress.complete) {
 			Callout("You've recorded all ${progress.required} nights. Thank you! Please pack the patch and charger in the return mailer and send the kit back to Lucidify.", Palette.Good)
 		} else {
@@ -436,6 +448,19 @@ fun RecordingScreen(graph: AppGraph) {
 	var awake by remember { mutableStateOf(false) }
 	// The patch has been silent for a minute: a full-screen red alert until it's back (or hidden).
 	var alertHiddenUntil by remember { mutableLongStateOf(0L) }
+	val nights by graph.series.nights.collectAsState()
+	val nightNumber = nights.indexOfFirst { it.localSessionId == rec.localSessionId }.let { if (it >= 0) it + 1 else nights.size }
+	// "I'm awake": 0 = the button, 1 = what woke you, 2 = noted. Goes back to the button by itself.
+	var awakeMode by remember { mutableIntStateOf(0) }
+	var awakeAt by remember { mutableLongStateOf(0L) }
+	var awakeReason by remember { mutableStateOf<String?>(null) }
+	var awakeEvent by remember { mutableStateOf<Deferred<String?>?>(null) }
+	LaunchedEffect(awakeMode) {
+		if (awakeMode != 0) {
+			delay(AWAKE_PANEL_MS)
+			awakeMode = 0
+		}
+	}
 	val alert = NightRecorder.patchAlert(rec, now) && now >= alertHiddenUntil
 	val bright = awake || confirmStop || alert
 	LaunchedEffect(Unit) { while (true) { delay(5_000); now = System.currentTimeMillis() } }
@@ -487,7 +512,7 @@ fun RecordingScreen(graph: AppGraph) {
 		horizontalAlignment = Alignment.CenterHorizontally
 	) {
 		Spacer(Modifier.weight(1f))
-		Text("Recording for ${formatDuration(rec.recordedMs)}", color = faint, fontSize = 22.sp)
+		Text("Recording · night $nightNumber", color = faint, fontSize = 22.sp)
 		Spacer(Modifier.height(10.dp))
 		Text(DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(now)), color = ink,
 			fontSize = 64.sp, fontWeight = FontWeight.Light)
@@ -499,10 +524,71 @@ fun RecordingScreen(graph: AppGraph) {
 		}
 		Text(patchLine, color = if (rec.outageActive) Palette.Warn else faint, fontSize = 17.sp)
 		Text(
+			"Started at ${DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(rec.nightStartedAtEpochMs))} · " +
+				"${formatDuration(rec.recordedMs)} recorded",
+			color = faint, fontSize = 15.sp
+		)
+		Text(
 			if (rec.cloudReachable) "Saved on phone • ${rec.uploadedPercent}% uploaded" else "Saved on phone • uploads when Wi-Fi is back",
 			color = faint, fontSize = 15.sp
 		)
 		rec.lastError?.let { Text(it, color = Palette.Bad.copy(alpha = 0.7f), fontSize = 15.sp) }
+		Spacer(Modifier.height(32.dp))
+		when (awakeMode) {
+			0 -> {
+				OutlinedButton(
+					onClick = {
+						awakeTap++
+						awakeAt = System.currentTimeMillis()
+						awakeReason = null
+						awakeEvent = scope.async { graph.recorder.markAwake() }
+						awakeMode = 1
+					},
+					modifier = Modifier.fillMaxWidth().height(72.dp),
+					shape = RoundedCornerShape(36.dp),
+					border = BorderStroke(2.dp, Palette.Amber.copy(alpha = if (bright) 1f else 0.6f))
+				) {
+					Text("I'm awake", color = Palette.Amber.copy(alpha = if (bright) 1f else 0.8f),
+						fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
+				}
+				Spacer(Modifier.height(8.dp))
+				Text("Tap it whenever you wake in the night. It helps us read your night.",
+					color = faint, fontSize = 15.sp, textAlign = TextAlign.Center)
+			}
+			1 -> {
+				Text("What woke you? (optional)", color = ink, fontSize = 19.sp)
+				Spacer(Modifier.height(10.dp))
+				WAKE_REASONS.chunked(2).forEach { row ->
+					Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+						row.forEach { reason ->
+							OutlinedButton(
+								onClick = {
+									awakeTap++
+									awakeReason = reason
+									awakeMode = 2
+									val event = awakeEvent
+									scope.launch { event?.await()?.let { graph.recorder.addAwakeReason(it, reason) } }
+								},
+								modifier = Modifier.weight(1f).heightIn(min = 56.dp),
+								shape = RoundedCornerShape(14.dp),
+								border = BorderStroke(1.dp, faint)
+							) { Text(reason, color = ink, fontSize = 16.sp, textAlign = TextAlign.Center) }
+						}
+					}
+					Spacer(Modifier.height(8.dp))
+				}
+				TextButton(onClick = { awakeMode = 2 }) { Text("Skip", color = faint, fontSize = 17.sp) }
+			}
+			else -> {
+				Text(
+					"Noted at ${DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(awakeAt))}" +
+						(awakeReason?.let { " · $it" } ?: ""),
+					color = ink, fontSize = 19.sp, textAlign = TextAlign.Center
+				)
+				Text("Recording continues. Rest when you can.", color = faint, fontSize = 16.sp)
+				TextButton(onClick = { awakeMode = 0 }) { Text("Done", color = Palette.Amber, fontSize = 18.sp) }
+			}
+		}
 		Spacer(Modifier.weight(1f))
 		Text(
 			if (bright) "You can lock your phone. Leave it on the charger." else "Tap the screen to brighten it.",
@@ -549,6 +635,8 @@ fun RecordingScreen(graph: AppGraph) {
 }
 
 private const val ALERT_HIDE_MS = 15 * 60_000L
+private const val AWAKE_PANEL_MS = 90_000L
+private val WAKE_REASONS = listOf("Bathroom", "Hot flash or sweats", "Pain", "Partner, child or noise", "Mind racing", "Just awake")
 
 /** Full screen, flashing red: the patch stopped sending during the night and needs a hand. */
 @Composable
@@ -616,19 +704,46 @@ fun GoodMorningScreen(graph: AppGraph, night: SeriesStore.Night) {
 	val progress = remember(nights, required) { graph.series.progress(required) }
 	val counted = night.status == SeriesStore.Status.COUNTED
 	val thisNight = rec.localSessionId == night.localSessionId
+	val scope = rememberCoroutineScope()
+	var diary by rememberSaveable { mutableStateOf(false) }
 	LaunchedEffect(Unit) { graph.recorder.wakeUploads() }
 
+	if (diary) {
+		MorningDiaryScreen(
+			graph, night,
+			onSaved = { graph.series.markReviewed(night.localSessionId) },
+			onBack = { diary = false }
+		)
+		return
+	}
+
+	val nightNumber = nights.indexOfFirst { it.localSessionId == night.localSessionId } + 1
+	val stoppedAt = night.endedAtEpochMs?.let { DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(it)) }
 	ScreenFrame(
 		title = "Good morning",
+		subtitle = listOfNotNull(if (nightNumber > 0) "Night $nightNumber" else null, stoppedAt?.let { "stopped at $it" })
+			.joinToString(" · ").ifBlank { null },
 		bottom = {
-			BigButton("Done") { graph.series.markReviewed(night.localSessionId) }
+			BigButton("Answer 4 quick questions") { diary = true }
+			QuietButton("Skip today") {
+				scope.launch(Dispatchers.IO) { graph.recorder.answers.skipDiary(night.localSessionId) }
+				graph.series.markReviewed(night.localSessionId)
+			}
 		}
 	) {
 		Text("You recorded ${formatDuration(night.recordedMs)}.", style = MaterialTheme.typography.titleLarge)
 		if (counted) {
 			Callout("This night counts. ${progress.counted} of ${progress.required} done.", Palette.Good)
 		} else {
-			Callout("This night was shorter than 4 hours, so it won't count. We've added one more night.", Palette.Warn)
+			Callout(
+				if (night.partial) {
+					"The patch was disconnected for ${formatDuration(night.gapMs)}, so less than 4 hours was recorded. " +
+						"This night won't count; we've added one more night."
+				} else {
+					"This night was shorter than 4 hours, so it won't count. We've added one more night."
+				},
+				Palette.Warn
+			)
 		}
 		if (thisNight) {
 			if (rec.uploadedPercent >= 100) {
@@ -654,26 +769,61 @@ fun GoodMorningScreen(graph: AppGraph, night: SeriesStore.Night) {
 @Composable
 fun MyNightsScreen(graph: AppGraph, onBack: () -> Unit) {
 	val nights by graph.series.nights.collectAsState()
-	val fmt = remember { DateFormat.getDateInstance(DateFormat.MEDIUM) }
-	ScreenFrame(title = "My nights", bottom = { QuietButton("Back", onClick = onBack) }) {
-		if (nights.isEmpty()) Note("Your nights will show here after your first recording.")
-		nights.asReversed().forEach { n ->
-			val (word, color) = when (n.status) {
-				SeriesStore.Status.COUNTED -> "Counts" to Palette.Good
-				SeriesStore.Status.SHORT -> "Too short" to Palette.Warn
-				SeriesStore.Status.RECORDING -> "Recording" to Palette.InkMuted
+	val setup by graph.setup.setup.collectAsState()
+	val required = setup.enrollment?.nightsRequired ?: 5
+	val progress = remember(nights, required) { graph.series.progress(required) }
+	val day = remember { SimpleDateFormat("EEE", Locale.getDefault()) }
+	val clock = remember { DateFormat.getTimeInstance(DateFormat.SHORT) }
+	val makeUps = progress.shortNights
+	// Back is the phone's back button; Home and Help are in the tab bar.
+	ScreenFrame(
+		title = "My nights",
+		subtitle = "${progress.counted} of ${progress.required} counted" +
+			if (makeUps > 0) " · $makeUps make-up night${if (makeUps == 1) "" else "s"} added" else ""
+	) {
+		nights.forEachIndexed { i, n ->
+			val (word, color) = when {
+				n.status == SeriesStore.Status.RECORDING -> "Recording now" to Palette.InkMuted
+				n.status == SeriesStore.Status.COUNTED -> "Counted · ${formatDuration(n.recordedMs)}" to Palette.Good
+				n.partial -> "Partial · didn't count" to Palette.Warn
+				else -> "Too short · didn't count" to Palette.Warn
 			}
-			Row(
-				Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Palette.NavyRaised).padding(16.dp),
-				verticalAlignment = Alignment.CenterVertically
-			) {
-				Column(Modifier.weight(1f)) {
-					Text(fmt.format(Date(n.startedAtEpochMs)), style = MaterialTheme.typography.bodyLarge)
-					if (n.status != SeriesStore.Status.RECORDING) Note(formatDuration(n.recordedMs))
+			val from = n.firstGapAtEpochMs?.let { " from ${clock.format(Date(it))}" } ?: ""
+			val detail = when {
+				n.status == SeriesStore.Status.SHORT && n.partial ->
+					"The patch was disconnected for ${formatDuration(n.gapMs)}$from, so only ${formatDuration(n.recordedMs)} was recorded. " +
+						"We added a make-up night, so nothing else changes for you."
+				n.status == SeriesStore.Status.SHORT ->
+					"${formatDuration(n.recordedMs)} recorded; a night needs 4 hours. We added a make-up night, so nothing else changes for you."
+				n.status == SeriesStore.Status.COUNTED && n.gapMs >= NOTE_GAP_MS ->
+					"The patch was disconnected for ${formatDuration(n.gapMs)}$from."
+				else -> null
+			}
+			NightRow("Night ${i + 1} · ${day.format(Date(n.startedAtEpochMs))}", word, color, detail)
+		}
+		// The nights still to come; ones beyond the planned number are make-up nights.
+		if (!progress.complete) {
+			val toCome = progress.required - progress.counted - (if (progress.recording) 1 else 0)
+			repeat(toCome.coerceAtLeast(0)) { k ->
+				val number = nights.size + k + 1
+				val tonight = k == 0 && !progress.recording
+				val tag = when {
+					number > progress.required -> " · make-up"
+					tonight -> " · tonight"
+					else -> ""
 				}
-				Text(word, color = color, fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
+				NightRow(
+					"Night $number$tag",
+					if (tonight) "Ready check when you head to bed" else "Still to come",
+					Palette.InkMuted,
+					null
+				)
 			}
 		}
+		Note(
+			if (progress.complete) "All nights are done. Home says how to return your kit."
+			else "After your last counted night, the app tells you how to return your kit."
+		)
 	}
 }
 
@@ -691,7 +841,6 @@ fun HelpScreen(graph: AppGraph, onBack: () -> Unit, onGuide: () -> Unit) {
 		bottom = {
 			BigButton("Send diagnostics") { ticket = sendDiagnostics(context, graph) }
 			QuietButton("Use a different patch") { confirmSwitch = true }
-			QuietButton("Back", onClick = onBack)
 		}
 	) {
 		if (confirmSwitch) {
@@ -713,10 +862,84 @@ fun HelpScreen(graph: AppGraph, onBack: () -> Unit, onGuide: () -> Unit) {
 		HelpItem("The patch won't connect", "Make sure its white light is on and it's near your phone. Turn Bluetooth off and on. If it still won't connect, hold the round button to turn the patch off, wait 30 seconds, and turn it on again.")
 		HelpItem("Red light flashing on the patch", "The sticker isn't touching your skin well. Press the edges firmly. If the red light keeps flashing, replace the sticker with a new one.")
 		HelpItem("Yellow light flashing", "The patch battery is low. Charge it before your next night.")
-		HelpItem("The night didn't count", "Nights shorter than 4 hours don't count. We add one more night automatically, so there's nothing you need to do.")
+		HelpItem("The night didn't count", "A night needs at least 4 hours of recording. If it was shorter, or the patch was disconnected for part of it, we add one more night automatically, so there's nothing you need to do. My nights shows what happened.")
+		HelpItem("Returning your kit", "After your last counted night, Home tells you you're done. Put the patch, its charger and any unused pouches in the return mailer that came with your kit, seal it and send it back. Used stickers and wipes go in the trash.")
+		HelpItem("Still stuck?", "Tap Send diagnostics below. It shares the app's logs (no sleep recording and nothing personal) and gives you a ticket code, so support can see what happened on your phone.")
 		ticket?.let { Callout("Your ticket code is $it. Tell Lucidify this code when you contact us.", Palette.Good) }
+		ContactSupport(ticket)
 	}
 }
+
+@Composable
+private fun ContactSupport(ticket: String?) {
+	if (!SupportInfo.available) return
+	val context = LocalContext.current
+	Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Palette.NavyRaised).padding(16.dp)) {
+		Text("Contact support", style = MaterialTheme.typography.titleLarge, fontSize = 19.sp)
+		if (SupportInfo.PHONE.isNotBlank()) {
+			TextButton(onClick = {
+				runCatching { context.startActivity(Intent(Intent.ACTION_DIAL, Uri.parse("tel:" + SupportInfo.PHONE))) }
+			}) { Text("Call or text ${SupportInfo.PHONE}", color = Palette.Amber, fontSize = 18.sp) }
+		}
+		if (SupportInfo.EMAIL.isNotBlank()) {
+			TextButton(onClick = {
+				val subject = "LucidSleep help" + (ticket?.let { " · ticket $it" } ?: "")
+				runCatching {
+					context.startActivity(
+						Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:" + SupportInfo.EMAIL)).putExtra(Intent.EXTRA_SUBJECT, subject)
+					)
+				}
+			}) { Text("Email ${SupportInfo.EMAIL}", color = Palette.Amber, fontSize = 18.sp) }
+		}
+		if (SupportInfo.HOURS.isNotBlank()) Note(SupportInfo.HOURS)
+	}
+}
+
+/** One night in My nights: its name, whether it counted, and what happened if it didn't. */
+@Composable
+private fun NightRow(title: String, status: String, color: Color, detail: String?) {
+	Column(
+		Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Palette.NavyRaised).padding(16.dp),
+		verticalArrangement = Arrangement.spacedBy(4.dp)
+	) {
+		Text(title, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold)
+		Text(status, color = color, fontSize = 17.sp)
+		detail?.let { Note(it) }
+	}
+}
+
+/** Home's card for the most recent finished night; tapping it opens My nights. */
+@Composable
+private fun LastNightCard(night: SeriesStore.Night, rec: NightRecorder.State, onClick: () -> Unit) {
+	val ended = night.endedAtEpochMs ?: return
+	val name = if (System.currentTimeMillis() - ended < 20 * 3_600_000L) "Last night"
+	else "Your last night (${SimpleDateFormat("EEEE", Locale.getDefault()).format(Date(night.startedAtEpochMs))})"
+	val verdict = when {
+		night.status == SeriesStore.Status.COUNTED -> "counted"
+		night.partial -> "didn't count: the patch was disconnected"
+		else -> "didn't count: too short"
+	}
+	val upload = when {
+		rec.localSessionId != night.localSessionId -> ""
+		rec.uploadedPercent >= 100 -> " · all uploaded"
+		else -> " · ${rec.uploadedPercent}% uploaded"
+	}
+	Row(
+		Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Palette.NavyRaised)
+			.clickable(onClick = onClick).padding(16.dp),
+		verticalAlignment = Alignment.CenterVertically
+	) {
+		Column(Modifier.weight(1f)) {
+			Text("$name $verdict", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold,
+				color = if (night.status == SeriesStore.Status.COUNTED) Palette.Ink else Palette.Warn)
+			Note("${formatDuration(night.recordedMs)} recorded$upload")
+		}
+		Text("›", fontSize = 30.sp, color = Palette.InkMuted)
+	}
+}
+
+/** A counted night's disconnections are mentioned in My nights once they add up to this. */
+private const val NOTE_GAP_MS = 15L * 60_000L
 
 @Composable
 private fun HelpItem(title: String, body: String) {
